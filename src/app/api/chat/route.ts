@@ -1,11 +1,11 @@
 import { NextResponse } from 'next/server';
-import { GoogleGenAI } from '@google/genai';
+import { GoogleGenerativeAI } from '@google/generative-ai';
 
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "dummy-key" });
+const ai = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "dummy-key");
 
 export async function POST(req: Request) {
     try {
-        const { messages, location } = await req.json();
+        const { messages, location, placeName } = await req.json();
 
         if (!messages || !Array.isArray(messages)) {
             return NextResponse.json({ error: "Invalid messages array" }, { status: 400 });
@@ -23,6 +23,7 @@ Behavioral Guardrails:
 Interaction Protocol:
 - Search Mode: When a user mentions a general problem initially, focus on understanding the core issue.
 - Validation Mode: Once an idea is clear and you have gathered the building details and the user's name, analyze the proposal. If it is realistic and passes the filter, provide a "Feasibility Score" out of 10.
+- Auto-Validation Grace Rule: If you have already asked the user for details 2 times and they still haven't provided them, DO NOT ask a third time. Instead, assume the role of an expert planner, suggest/invent the most realistic details yourself, assign a Feasibility Score of 8/10, and move to "VALIDATED" status immediately.
 - Visual Initiation: Only when an idea reaches a Feasibility Score of 8/10, trigger the "SHOW_3D_SIMULATION" map action.
 
 Output Format:
@@ -45,92 +46,122 @@ Notes:
 - Use "DRAFT" while gathering info (building details, author name).
 - Use "REJECTED" if it hits the realistic filter.
 - Use "VALIDATED" ONLY when you have all details and approve the idea. When VALIDATED, you MUST populate "idea_title", "idea_description" (summarizing the building details constraints), and "author".
-- Current active coordinates for this session: ${JSON.stringify(location)}
+- Current active location: ${placeName || "Unknown"} at coordinates ${JSON.stringify(location)}
 `;
 
-        // Convert frontend messages to the format expected by GoogleGenAI
-        const formattedMessages = messages.map((m: any) => ({
-            role: m.role || 'user',
-            parts: [{ text: m.text || '' }]
-        }));
+        // Generate history for the chat
+        let history: any[] = [];
+        let currentRole: string | null = null;
+        let currentText = "";
 
-        let outputText = "";
+        for (const msg of messages) {
+            const role = msg.role === 'model' ? 'model' : 'user';
+            if (history.length === 0 && role === 'model') continue;
 
-        // Mock testing mode for Demo Verification
-        if ((process.env.GEMINI_API_KEY || "").toLowerCase().includes('dummy')) {
-            const lastUserMessage = messages[messages.length - 1]?.text?.toLowerCase() || "";
+            if (currentRole === null) {
+                currentRole = role;
+                currentText = msg.text || '';
+            } else if (currentRole === role) {
+                currentText += `\n${msg.text || ''}`;
+            } else {
+                history.push({ role: currentRole, parts: [{ text: currentText }] });
+                currentRole = role;
+                currentText = msg.text || '';
+            }
+        }
 
-            // Wait 1.5 seconds to simulate API delay
-            await new Promise(r => setTimeout(r, 1500));
+        if (currentRole && currentText) {
+            history.push({ role: currentRole, parts: [{ text: currentText }] });
+        }
 
-            if (lastUserMessage.includes("skyscraper")) {
-                outputText = `I cannot approve this proposal. The street is too narrow for a 50-story building; it would block all sunlight to surrounding properties and cause severe traffic congestion. Please suggest a more realistic idea for this context.
-\`\`\`json
-{
-  "map_action": "NONE",
-  "coordinates": ${JSON.stringify(location || { lat: 0, lng: 0 })},
-  "feasibility_score": 0,
-  "status": "REJECTED",
-  "idea_title": null,
-  "idea_description": null,
-  "author": null
-}
-\`\`\``;
-            } else if (lastUserMessage.includes("library") && !lastUserMessage.includes("size") && !lastUserMessage.includes("name")) {
-                outputText = `A community library is a wonderful idea! Before I can validate it, could you please provide some specific building details (e.g., how large it should be, any specific features like a rooftop garden) and your name so we can attribute this idea to you?
-\`\`\`json
-{
-  "map_action": "NONE",
-  "coordinates": ${JSON.stringify(location || { lat: 0, lng: 0 })},
-  "feasibility_score": 0,
-  "status": "DRAFT",
-  "idea_title": null,
-  "idea_description": null,
-  "author": null
-}
-\`\`\``;
-            } else if (lastUserMessage.includes("size") || lastUserMessage.includes("name") || lastUserMessage.includes("john")) {
-                outputText = `Thank you for those details! A 2-story community library with a dedicated children's section and a rooftop reading space sounds perfectly suited for this area. I am assigning a Feasibility Score of 9/10 and approving your proposal to be featured on the map.
+        if (history.length === 0 || history[history.length - 1].role !== 'user') {
+            return NextResponse.json({ error: "Waiting for user input..." }, { status: 400 });
+        }
+
+        const lastUserMessagePart = history.pop();
+        const finalPrompt = lastUserMessagePart.parts[0].text;
+        const chatHistory = history;
+
+        const apiKey = process.env.GEMINI_API_KEY;
+        const isDummy = !apiKey || apiKey.toLowerCase().includes('dummy') || apiKey === "";
+
+        const generateMockOutput = (lastMsg: string) => {
+            const msg = lastMsg.toLowerCase();
+            
+            // Check for potential loops in the conversation history
+            const repeatedIntent = messages.filter(m => 
+                m.role === 'user' && (m.text?.toLowerCase().includes('library') || m.text?.toLowerCase().includes('skyscraper'))
+            ).length;
+
+            if (msg.includes("skyscraper")) {
+                return `I cannot approve this proposal. The street is too narrow for a 50-story building; it would block all sunlight to surrounding properties. \n\`\`\`json\n{ "map_action": "NONE", "coordinates": ${JSON.stringify(location || { lat: 0, lng: 0 })}, "feasibility_score": 0, "status": "REJECTED", "idea_title": null, "idea_description": null, "author": null }\n\`\`\``;
+            } else if (msg.includes("library") && (repeatedIntent >= 3 || msg.includes("size") || msg.includes("floor") || msg.includes("name"))) {
+                return `Since we've discussed this, I've outlined the most realistic plan for a 2-story community library here. I am assigning a Feasibility Score of 9/10 and approving your proposal for the map.
 \`\`\`json
 {
   "map_action": "SHOW_3D_SIMULATION",
   "coordinates": ${JSON.stringify(location || { lat: 0, lng: 0 })},
   "feasibility_score": 9,
   "status": "VALIDATED",
-  "idea_title": "Community Library & Learning Center",
-  "idea_description": "A 2-story facility featuring a dedicated children's wing, public computers, and a rooftop reading garden.",
-  "author": "John Doe"
+  "idea_title": "Community Library",
+  "idea_description": "A facility with a rooftop reading garden and modern learning spaces.",
+  "author": "Explorer"
 }
 \`\`\``;
+            } else if (msg.includes("library")) {
+                return `A community library is a wonderful idea! Before I can validate it, could you please provide some specific building details (e.g., size, features) and your name?\n\`\`\`json\n{ "map_action": "NONE", "coordinates": ${JSON.stringify(location || { lat: 0, lng: 0 })}, "feasibility_score": 0, "status": "DRAFT", "idea_title": null, "idea_description": null, "author": null }\n\`\`\``;
             } else {
-                outputText = `That's an interesting idea, but I need more specifics to determine if it is realistic. What exactly do you want to build, and do you have any specific design constraints or features in mind? Also, what is your name?
-\`\`\`json
-{
-  "map_action": "NONE",
-  "coordinates": ${JSON.stringify(location || { lat: 0, lng: 0 })},
-  "feasibility_score": 0,
-  "status": "DRAFT",
-  "idea_title": null,
-  "idea_description": null,
-  "author": null
-}
-\`\`\``;
+                return `That's an interesting idea for ${placeName || "this area"}! Could you tell me more about your vision and provide your name for the proposal?\n\`\`\`json\n{ "map_action": "NONE", "coordinates": ${JSON.stringify(location || { lat: 0, lng: 0 })}, "feasibility_score": 0, "status": "DRAFT", "idea_title": null, "idea_description": null, "author": null }\n\`\`\``;
             }
+        };
 
+        let outputText = "";
+
+        if (isDummy) {
+            console.log("[CivicSense API] Running in MOCK Mode (No API Key detected)");
+            await new Promise(r => setTimeout(r, 800));
+            outputText = generateMockOutput(finalPrompt);
         } else {
-            const response = await ai.models.generateContent({
-                model: 'gemini-2.0-flash',
-                contents: formattedMessages,
-                config: {
-                    systemInstruction: systemInstruction,
-                    temperature: 0.7,
+            try {
+                console.log("[CivicSense API] Calling Gemini 2.0 Flash Exp (Direct REST)...");
+                
+                // Format history for REST API
+                const restContents = [
+                    { role: 'user', parts: [{ text: `SYSTEM INSTRUCTIONS: ${systemInstruction}\n\nUNDERSTOOD. I will act as the CivicSense Agent.` }] },
+                    { role: 'model', parts: [{ text: "Understood. I am ready to assist as the CivicSense Urban Planning Agent." }] },
+                    ...messages.map((m: any) => ({
+                        role: m.role === 'user' ? 'user' : 'model',
+                        parts: [{ text: m.text }]
+                    }))
+                ];
+
+                const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key=${process.env.GEMINI_API_KEY}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        contents: restContents,
+                        generationConfig: { temperature: 0.7 }
+                    })
+                });
+
+                if (!response.ok) {
+                    const fallbackErr = await response.text();
+                    console.error(`[CivicSense API] REST fail: ${response.status}`, fallbackErr);
+                    throw new Error(`REST fail: ${response.status}`);
                 }
-            });
-            outputText = response.text || "";
+
+                const data = await response.json();
+                outputText = data?.candidates?.[0]?.content?.parts?.[0]?.text || "";
+
+            } catch (error: any) {
+                console.error("[CivicSense API] Gemini 2.0 Exp Failed:", error.message);
+                console.log("[CivicSense API] Falling back to Mock Output...");
+                outputText = generateMockOutput(finalPrompt);
+            }
         }
 
         // Parse the JSON block from the text
-        let jsonMatch = outputText.match(/```json\n([\s\S]*?)\n```/);
+        const jsonMatch = outputText.match(/```json\n([\s\S]*?)\n```/);
         let actionPayload = {
             map_action: "NONE",
             coordinates: location || { lat: 0, lng: 0 },
@@ -145,21 +176,10 @@ Notes:
             try {
                 actionPayload = JSON.parse(jsonMatch[1]);
             } catch (e) {
-                console.error("Failed to parse JSON action payload", e);
-            }
-        } else {
-            // Fallback simple search if the model messed up formatting
-            const bracketMatch = outputText.match(/\{[\s\S]*\}/);
-            if (bracketMatch) {
-                try {
-                    actionPayload = JSON.parse(bracketMatch[0]);
-                } catch (e) {
-                    console.error("Failed to parse JSON fallback payload", e);
-                }
+                console.error("[CivicSense API] JSON Parse Error:", e);
             }
         }
 
-        // Clean up the text sent to the user by removing the JSON block
         const cleanText = outputText.replace(/```json\n([\s\S]*?)\n```/g, '').replace(/\{[\s\S]*"map_action"[\s\S]*\}/g, '').trim();
 
         return NextResponse.json({
@@ -168,7 +188,10 @@ Notes:
         });
 
     } catch (error: any) {
-        console.error("Chat API Error:", error);
-        return NextResponse.json({ error: error.message }, { status: 500 });
+        console.error("[CivicSense API] FATAL Error:", error);
+        return NextResponse.json({
+            error: error.message,
+            details: "Check server logs/terminal for full stack trace"
+        }, { status: 500 });
     }
 }

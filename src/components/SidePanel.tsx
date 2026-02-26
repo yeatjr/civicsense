@@ -2,9 +2,10 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { collection, addDoc } from 'firebase/firestore';
+import { collection, addDoc, doc, setDoc } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
-import { X, Loader2, Send, Bot, User, CheckCircle, XCircle } from 'lucide-react';
+import { X, Loader2, Send, Bot, User, CheckCircle, XCircle, Image as ImageIcon, MapPin, LogIn } from 'lucide-react';
+import { useAuth } from '@/context/AuthContext';
 
 interface SidePanelProps {
     isOpen: boolean;
@@ -12,14 +13,16 @@ interface SidePanelProps {
     onCancel: () => void;
     onSuccess: () => void;
     onAiAction?: (action: any) => void;
+    placeName?: string | null;
 }
 
 type Message = {
     role: 'user' | 'model';
     text: string;
+    imageBase64?: string | null;
 };
 
-export default function SidePanel({ isOpen, location, onCancel, onSuccess, onAiAction }: SidePanelProps) {
+export default function SidePanel({ isOpen, location, onCancel, onSuccess, onAiAction, placeName }: SidePanelProps) {
     const [messages, setMessages] = useState<Message[]>([]);
     const [input, setInput] = useState('');
     const [loading, setLoading] = useState(false);
@@ -27,22 +30,40 @@ export default function SidePanel({ isOpen, location, onCancel, onSuccess, onAiA
     const [status, setStatus] = useState<'DRAFT' | 'VALIDATED' | 'REJECTED'>('DRAFT');
     const [feasibility, setFeasibility] = useState<number | null>(null);
     const [simulation, setSimulation] = useState(false);
+    const [visionLoading, setVisionLoading] = useState(false);
+    const [generatedVision, setGeneratedVision] = useState<string | null>(null);
+    const [statusText, setStatusText] = useState('');
     const messagesEndRef = useRef<HTMLDivElement>(null);
+    const { user, loginWithGoogle } = useAuth();
 
     // Initial greeting when panel opens
     useEffect(() => {
-        if (isOpen && messages.length === 0) {
-            setMessages([{ role: 'model', text: "Hi! I'm the CivicSense Urban Planning Agent. What kind of renovation or new business would you like to propose here?" }]);
+        if (isOpen) {
+            const isInitial = messages.length === 0;
+            const isScanning = messages.length === 1 && messages[0].text.includes("scanning");
+
+            if (isInitial || isScanning) {
+                const isRealName = placeName && placeName !== "Detecting location...";
+                const greeting = isRealName
+                    ? `Hi! I see you're interested in **${placeName}**. What's your vision for this location?`
+                    : "Hi! I'm scanning this location for you... What kind of renovation or new business would you like to propose here?";
+
+                // Only update if the greeting actually changes
+                if (isInitial || (isRealName && isScanning)) {
+                    setMessages([{ role: 'model', text: greeting }]);
+                }
+            }
             setStatus('DRAFT');
             setFeasibility(null);
             setSimulation(false);
+            setGeneratedVision(null);
         }
         if (!isOpen) {
             setMessages([]);
             setInput('');
             setError('');
         }
-    }, [isOpen]);
+    }, [isOpen, placeName]);
 
     useEffect(() => {
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -63,7 +84,7 @@ export default function SidePanel({ isOpen, location, onCancel, onSuccess, onAiA
             const res = await fetch('/api/chat', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ messages: newMessages, location })
+                body: JSON.stringify({ messages: newMessages, location, placeName })
             });
 
             if (!res.ok) throw new Error('Failed to get response');
@@ -80,19 +101,119 @@ export default function SidePanel({ isOpen, location, onCancel, onSuccess, onAiA
                 if (action.feasibility_score > 0) setFeasibility(action.feasibility_score);
 
                 if (action.status === 'VALIDATED') {
-                    await addDoc(collection(db, 'pins'), {
+                    setVisionLoading(true);
+                    setStatusText('Capturing map perspective...');
+
+                    // Capture Context Images
+                    const googleApiKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY;
+                    const svUrl = `https://maps.googleapis.com/maps/api/streetview?size=640x640&location=${location.lat},${location.lng}&fov=90&pitch=0&key=${googleApiKey}`;
+                    const satUrl = `https://maps.googleapis.com/maps/api/staticmap?center=${location.lat},${location.lng}&zoom=19&size=640x640&maptype=satellite&format=jpg&key=${googleApiKey}`;
+
+                    const fetchBase64 = async (url: string) => {
+                        try {
+                            const r = await fetch(url);
+                            if (!r.ok) return null;
+                            const blob = await r.blob();
+                            return new Promise<string>((resolve) => {
+                                const reader = new FileReader();
+                                reader.readAsDataURL(blob);
+                                reader.onloadend = () => resolve((reader.result as string).split(',')[1]);
+                            });
+                        } catch { return null; }
+                    };
+
+                    const [svBase64, satBase64] = await Promise.all([fetchBase64(svUrl), fetchBase64(satUrl)]);
+
+                    // Trigger Backend Vision Generation
+                    let finalVisionImage = null;
+                    let analysisData = null;
+                    try {
+                        setStatusText('AI: Analyzing urban environment...');
+                        const visionRes = await fetch('/api/vision/generate', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                text: action.idea_description || userText,
+                                location,
+                                streetView: svBase64,
+                                satellite: satBase64,
+                                placeName: action.idea_title,
+                                placeTypes: []
+                            })
+                        });
+                        const visionData = await visionRes.json();
+                        if (visionData.success && visionData.imageBase64) {
+                            finalVisionImage = visionData.imageBase64;
+                            analysisData = visionData.analysis;
+                            setGeneratedVision(visionData.imageBase64);
+                        }
+                    } catch (vErr) {
+                        console.error("Vision Generation failed:", vErr);
+                    } finally {
+                        setVisionLoading(false);
+                        setStatusText('');
+                    }
+
+                    const linkedPlaceId = `civic_${location.lat.toFixed(5)}_${location.lng.toFixed(5)}`;
+
+                    const pinPayload = {
                         lat: location.lat,
                         lng: location.lng,
                         review: action.idea_description || "Agent Chat History Logged",
                         businessType: action.idea_title || "New Proposal",
-                        author: action.author || "Anonymous",
+                        author: user?.displayName || user?.email || "Anonymous",
                         agreementCount: 0,
                         saturationIndex: action.feasibility_score || 5, // Feasibility replaces Saturation temporarily for demo
-                        createdAt: new Date()
-                    });
+                        visionImage: finalVisionImage,
+                        analysis: analysisData,
+                        createdAt: new Date(),
+                        userId: user?.uid || null
+                    };
 
-                    // Immediately trigger onSuccess to close the panel & unlock map
-                    onSuccess();
+                    const commentPayload = {
+                        placeId: linkedPlaceId,
+                        placeName: action.idea_title || placeName || "CivicSense Proposal",
+                        text: action.idea_description || userText,
+                        author: user?.displayName || "Civic User",
+                        likes: 0,
+                        imageStatus: finalVisionImage ? 'done' : 'failed',
+                        imageBase64: finalVisionImage,
+                        environmentAnalysis: analysisData?.envAnalysis || null,
+                        satelliteAnalysis: analysisData?.satelliteAnalysis || null,
+                        timestamp: new Date(),
+                        source: 'CivicSense'
+                    };
+
+                    const placePayload = {
+                        name: action.idea_title || placeName || "CivicSense Proposal",
+                        address: placeName || "Civic Location",
+                        latitude: location.lat,
+                        longitude: location.lng,
+                        lastUpdated: new Date(),
+                        isCivicSense: true
+                    };
+
+                    await Promise.all([
+                        addDoc(collection(db, 'pins'), pinPayload),
+                        addDoc(collection(db, 'comments'), commentPayload),
+                        // use setDoc if we want a specific ID, but firestore v9 web uses different syntax
+                        // Let's use the standard doc/setDoc pattern for places to use our custom placeId
+                    ]);
+
+                    await setDoc(doc(db, 'places', linkedPlaceId), placePayload, { merge: true });
+
+
+                    // Add vision to chat history before closing or staying
+                    if (finalVisionImage) {
+                        setMessages(prev => [...prev, { 
+                            role: 'model', 
+                            text: 'I have generated a 3D architecture vision for your proposal:',
+                            imageBase64: finalVisionImage 
+                        }]);
+                    }
+
+                    // Delay closing or let user see it
+                    // onSuccess(); 
                 }
 
                 if (action.map_action === 'SHOW_3D_SIMULATION') {
@@ -113,6 +234,7 @@ export default function SidePanel({ isOpen, location, onCancel, onSuccess, onAiA
         <AnimatePresence>
             {isOpen && (
                 <motion.div
+                    key="side-panel"
                     initial={{ x: '100%', opacity: 0 }}
                     animate={{ x: 0, opacity: 1 }}
                     exit={{ x: '100%', opacity: 0 }}
@@ -121,12 +243,14 @@ export default function SidePanel({ isOpen, location, onCancel, onSuccess, onAiA
                 >
                     {/* Header */}
                     <div className="p-5 border-b border-white/10 flex justify-between items-center bg-black/20">
-                        <div>
-                            <h2 className="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-purple-400 to-blue-500 font-outfit">
-                                AI Planning Agent
+                        <div className="flex-1 min-w-0 mr-4">
+                            <h2 className="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-purple-400 to-blue-500 font-outfit truncate">
+                                {placeName || "AI Planning Agent"}
                             </h2>
                             <div className="flex items-center gap-2 mt-1">
-                                <div className="text-[10px] text-gray-400 font-medium tracking-wider uppercase">Status: {status}</div>
+                                <div className="text-[10px] text-gray-400 font-medium tracking-wider uppercase">
+                                    {placeName === "Detecting location..." ? "Searching..." : (placeName ? "Contextual Planning" : `Status: ${status}`)}
+                                </div>
                                 {feasibility !== null && (
                                     <div className="text-[10px] bg-purple-500/20 text-purple-300 px-2 py-0.5 rounded flex items-center gap-1">
                                         Score: {feasibility}/10
@@ -144,6 +268,33 @@ export default function SidePanel({ isOpen, location, onCancel, onSuccess, onAiA
 
                     {/* Chat Area */}
                     <div className="flex-1 overflow-y-auto p-5 space-y-4 custom-scrollbar">
+                        {/* Selected Place Context Display */}
+                        {placeName && (
+                            <motion.div
+                                initial={{ opacity: 0, scale: 0.95 }}
+                                animate={{ opacity: 1, scale: 1 }}
+                                className="mb-6"
+                            >
+                                <div className="bg-gradient-to-br from-purple-600/20 to-blue-600/20 border border-white/20 rounded-2xl p-4 shadow-xl backdrop-blur-md relative overflow-hidden group">
+                                    <div className="absolute top-0 right-0 p-2 opacity-10 group-hover:opacity-20 transition-opacity">
+                                        <MapPin className="w-12 h-12" />
+                                    </div>
+                                    <div className="relative z-10">
+                                        <div className="flex items-center gap-2 mb-1">
+                                            <div className="w-1.5 h-1.5 rounded-full bg-purple-400 animate-pulse" />
+                                            <span className="text-[10px] font-bold text-purple-300 uppercase tracking-widest">Active Planning Context</span>
+                                        </div>
+                                        <h3 className="text-lg font-bold text-white leading-tight">
+                                            {placeName}
+                                        </h3>
+                                        <p className="text-[10px] text-white/50 mt-1 font-medium">
+                                            Coordinates: {location?.lat.toFixed(4)}, {location?.lng.toFixed(4)}
+                                        </p>
+                                    </div>
+                                </div>
+                            </motion.div>
+                        )}
+
                         {messages.map((msg, idx) => (
                             <motion.div
                                 key={idx}
@@ -160,6 +311,15 @@ export default function SidePanel({ isOpen, location, onCancel, onSuccess, onAiA
                                     : 'bg-white/10 text-gray-200 border border-white/10 rounded-tl-sm'
                                     }`}>
                                     {msg.text}
+                                    {msg.imageBase64 && (
+                                        <div className="mt-3 rounded-lg overflow-hidden border border-white/20 shadow-lg">
+                                            <img 
+                                                src={`data:image/jpeg;base64,${msg.imageBase64}`} 
+                                                alt="AI Vision"
+                                                className="w-full h-auto object-cover"
+                                            />
+                                        </div>
+                                    )}
                                 </div>
                             </motion.div>
                         ))}
@@ -202,18 +362,32 @@ export default function SidePanel({ isOpen, location, onCancel, onSuccess, onAiA
                         </div>
                     )}
 
+                    {visionLoading && (
+                        <div className="mx-5 mb-2 bg-purple-500/20 border border-purple-500/30 p-3 rounded-xl flex flex-col gap-2">
+                            <div className="flex items-center gap-3">
+                                <ImageIcon className="w-5 h-5 text-purple-400 animate-pulse shrink-0" />
+                                <div className="flex flex-col">
+                                    <p className="text-xs text-purple-200 font-bold">Generating Architecture Vision...</p>
+                                    {statusText && <p className="text-[10px] text-purple-300/80 animate-pulse">{statusText}</p>}
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
                     {error && (
                         <div className="mx-5 mb-2 text-red-400 text-xs bg-red-500/10 p-2 rounded-lg border border-red-500/20">
                             {error}
                         </div>
                     )}
 
+
+
                     {/* Input Area */}
                     <div className="p-5 border-t border-white/10 bg-black/20">
                         <form onSubmit={handleSend} className="relative">
                             <input
                                 type="text"
-                                placeholder={status === 'VALIDATED' ? "Approved..." : "Type your answer..."}
+                                placeholder={status === 'VALIDATED' ? "Approved..." : (user ? "Type your answer..." : "Chat as Guest...")}
                                 value={input}
                                 onChange={(e) => setInput(e.target.value)}
                                 disabled={loading || status === 'VALIDATED'}
@@ -227,6 +401,17 @@ export default function SidePanel({ isOpen, location, onCancel, onSuccess, onAiA
                                 <Send className="w-4 h-4 ml-0.5" />
                             </button>
                         </form>
+                        {!user && (
+                            <div className="mt-2 text-center">
+                                <button
+                                    onClick={() => loginWithGoogle()}
+                                    className="text-[10px] text-purple-400 hover:text-purple-300 font-bold uppercase tracking-widest transition-colors flex items-center justify-center gap-1 mx-auto"
+                                >
+                                    <LogIn className="w-3 h-3" />
+                                    Sign in to save visions to the map
+                                </button>
+                            </div>
+                        )}
                     </div>
                 </motion.div>
             )}

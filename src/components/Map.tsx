@@ -1,13 +1,14 @@
 'use client';
 
 import React, { useState, useCallback, useEffect } from 'react';
-import { APIProvider, Map as GoogleMap, AdvancedMarker, Pin, useMap } from '@vis.gl/react-google-maps';
+import { APIProvider, Map as GoogleMap, AdvancedMarker, Pin, useMap, useMapsLibrary } from '@vis.gl/react-google-maps';
 import { collection, getDocs } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Bot, MessageSquare } from 'lucide-react';
 import SidePanel from './SidePanel';
 import IdeaGallery from './IdeaGallery';
+import VisionGallery from './VisionGallery';
 import { useAuth } from '@/context/AuthContext';
 
 export type RenovationPin = {
@@ -17,6 +18,7 @@ export type RenovationPin = {
     review: string;
     businessType: string;
     saturationIndex: number | null;
+    visionImage?: string;
 };
 
 // A dark mode theme for Google Maps
@@ -102,18 +104,34 @@ const darkTheme = [
 ];
 
 export default function Map() {
+    return (
+        <APIProvider
+            apiKey={(process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY && !process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY.includes('Dummy')) ? process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY : ''}
+            libraries={['places', 'marker', 'geometry']}
+        >
+            <MapInner />
+        </APIProvider>
+    );
+}
+
+function MapInner() {
     const [pins, setPins] = useState<RenovationPin[]>([]);
     const [tempPin, setTempPin] = useState<{ lat: number, lng: number } | null>(null);
     const [hoveredPinId, setHoveredPinId] = useState<string | null>(null);
     const [mapData, setMapData] = useState({ lat: 40.7128, lng: -74.0060, zoom: 13 });
     const [selectedLocation, setSelectedLocation] = useState<{ lat: number, lng: number } | null>(null);
+    const [selectedPlaceName, setSelectedPlaceName] = useState<string | null>(null);
 
     // Auth context
     const { user, loginWithGoogle } = useAuth();
 
     const handleAiResponse = (action: any) => {
         if (action.map_action === "MOVE_TO" && action.coordinates) {
-            setMapData(prev => ({ ...prev, lat: action.coordinates.lat, lng: action.coordinates.lng }));
+            const { lat, lng } = action.coordinates;
+            setMapData(prev => ({ ...prev, lat, lng }));
+            if (map) {
+                map.panTo({ lat, lng });
+            }
         }
     };
 
@@ -137,6 +155,7 @@ export default function Map() {
     const handleRightClick = (e: any) => {
         if (e.detail?.latLng) {
             if (user) {
+                setSelectedPlaceName(null);
                 setTempPin({ lat: e.detail.latLng.lat, lng: e.detail.latLng.lng });
             } else {
                 loginWithGoogle();
@@ -144,8 +163,123 @@ export default function Map() {
         }
     };
 
+    const map = useMap();
+    const placesLib = useMapsLibrary('places');
+    const geocodingLib = useMapsLibrary('geocoding');
+
+    const handleMapClick = useCallback((e: any) => {
+        if (!map || !placesLib || !geocodingLib) {
+            console.log("[CivicSense] Map dependencies not ready:", {
+                map: !!map,
+                places: !!placesLib,
+                geocoding: !!geocodingLib
+            });
+            return;
+        }
+
+        const latLng = e.detail?.latLng || e.latLng;
+        const placeId = e.detail?.placeId;
+
+        if (!latLng) return;
+
+        const lat = typeof latLng.lat === 'function' ? latLng.lat() : latLng.lat;
+        const lng = typeof latLng.lng === 'function' ? latLng.lng() : latLng.lng;
+
+        const REGION_TYPES = [
+            'locality', 'political', 'neighborhood', 'sublocality',
+            'sublocality_level_1', 'sublocality_level_2',
+            'administrative_area_level_1', 'administrative_area_level_2',
+            'administrative_area_level_3', 'administrative_area_level_4',
+            'country', 'postal_code', 'route', 'geocode',
+            'colloquial_area', 'natural_feature'
+        ];
+
+        const isRegionType = (types: string[]) => {
+            return types && types.length > 0 && types.every(t => REGION_TYPES.includes(t));
+        };
+
+        // Open panel immediately with a loading state for better responsiveness
+        setSelectedPlaceName("Detecting location...");
+        setTempPin({ lat, lng });
+
+        const findNearestBusiness = (loc: { lat: number, lng: number }, service: google.maps.places.PlacesService) => {
+            console.log("[CivicSense] Searching for context at", loc);
+
+            // Priority 1: Geocode for Area/Neighborhood Name
+            const geocoder = new geocodingLib.Geocoder();
+            geocoder.geocode({ location: loc }, (gResults: any, gStatus: any) => {
+                console.log("[CivicSense] Geocode status:", gStatus);
+                const isGeoOk = (gStatus as any) === 'OK' || (gStatus as any) === (geocodingLib as any).GeocoderStatus.OK;
+
+                if (isGeoOk && gResults?.[0]) {
+                    const result = gResults[0];
+                    const area = result.address_components.find((c: any) =>
+                        c.types.includes('neighborhood') ||
+                        c.types.includes('sublocality') ||
+                        c.types.includes('locality')
+                    );
+
+                    // If we found a specific area/neighborhood, use it
+                    if (area && !area.types.includes('country')) {
+                        console.log("[CivicSense] Found area name:", area.long_name);
+                        setSelectedPlaceName(area.long_name);
+                        return;
+                    }
+                }
+
+                // Priority 2: Nearby Search for Establishment
+                service.nearbySearch({
+                    location: loc,
+                    radius: 50,
+                    type: 'establishment'
+                }, (results, status) => {
+                    console.log("[CivicSense] nearbySearch status:", status);
+                    const isOk = (status as any) === 'OK' || (status as any) === (placesLib as any).PlacesServiceStatus.OK;
+                    if (isOk && results && results.length > 0) {
+                        const foundName = results[0].name || "New Development";
+                        console.log("[CivicSense] nearbySearch found business:", foundName);
+                        setSelectedPlaceName(foundName);
+                    } else if (gResults?.[0]) {
+                        // Fallback to formatted address
+                        setSelectedPlaceName(gResults[0].formatted_address.split(',')[0]);
+                    } else {
+                        setSelectedPlaceName(`Location: ${loc.lat.toFixed(4)}, ${loc.lng.toFixed(4)}`);
+                    }
+                });
+            });
+        };
+
+        const service = new placesLib.PlacesService(map);
+        const latLngObj = { lat, lng };
+
+        if (placeId) {
+            console.log("[CivicSense] POI clicked. ID:", placeId);
+            if (e.stop) e.stop();
+            service.getDetails({ placeId, fields: ['name', 'types', 'formatted_address'] }, (place, status) => {
+                console.log("[CivicSense] getDetails status:", status);
+                const isDetOk = (status as any) === 'OK' || (status as any) === (placesLib as any).PlacesServiceStatus.OK;
+                if (isDetOk) {
+                    if (place && isRegionType(place.types || [])) {
+                        console.log("[CivicSense] Region detected (" + place.name + "), checking for businesses...");
+                        findNearestBusiness(latLngObj, service);
+                    } else if (place) {
+                        console.log("[CivicSense] Specific place detected:", place.name);
+                        setSelectedPlaceName(place.name || "Unknown Place");
+                    }
+                } else {
+                    console.warn("[CivicSense] getDetails failed. Falling back to nearby search.");
+                    findNearestBusiness(latLngObj, service);
+                }
+            });
+        } else {
+            console.log("[CivicSense] Background click at:", latLngObj);
+            findNearestBusiness(latLngObj, service);
+        }
+    }, [user, map, placesLib, geocodingLib]);
+
     const handleCancel = () => {
         setTempPin(null);
+        setSelectedPlaceName(null);
     };
 
     const handlePinCreated = () => {
@@ -183,69 +317,94 @@ export default function Map() {
 
     return (
         <div className="w-full h-full relative">
-            <APIProvider apiKey={(process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY && !process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY.includes('Dummy')) ? process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY : ''}>
-                <GoogleMap
-                    center={{ lat: mapData.lat, lng: mapData.lng }}
-                    zoom={mapData.zoom}
-                    onCenterChanged={(ev: any) => setMapData(prev => ({ ...prev, lat: ev.detail.center.lat, lng: ev.detail.center.lng }))}
-                    onZoomChanged={(ev: any) => setMapData(prev => ({ ...prev, zoom: ev.detail.zoom }))}
-                    mapId="map_id_civic_sense"
-                    onContextmenu={handleRightClick}
-                    styles={darkTheme as any}
-                    disableDefaultUI={true}
-                    clickableIcons={false}
-                >
-                    {Object.values(groupedPins).map((group) => (
-                        <AdvancedMarker
-                            key={group.mainPinId}
-                            position={{ lat: group.lat, lng: group.lng }}
-                            onMouseEnter={() => setHoveredPinId(group.mainPinId)}
-                            onMouseLeave={() => setHoveredPinId(null)}
-                            onClick={() => setSelectedLocation({ lat: group.lat, lng: group.lng })}
-                            className="group cursor-pointer"
-                        >
-                            <div className="relative flex items-center justify-center">
-                                <motion.div
-                                    whileHover={{ scale: 1.2 }}
-                                    className="bg-purple-600 rounded-full w-8 h-8 flex items-center justify-center border-2 border-white/20 shadow-lg shadow-purple-500/50"
-                                >
-                                    <Pin background={'#9333ea'} glyphColor={'#ffffff'} borderColor={'transparent'} />
-                                </motion.div>
-
-                                {/* Tooltip for Saturation Index on hover */}
-                                {hoveredPinId === group.mainPinId && group.ideas[0].saturationIndex !== null && (
-                                    <motion.div
-                                        initial={{ opacity: 0, y: 10 }}
-                                        animate={{ opacity: 1, y: 0 }}
-                                        className="absolute bottom-10 whitespace-nowrap bg-black/80 backdrop-blur-md rounded-lg px-3 py-2 text-xs font-semibold text-white border border-white/10 shadow-2xl z-50 pointer-events-none"
-                                    >
-                                        Saturation Index: <span className={group.ideas[0].saturationIndex > 5 ? "text-red-400" : "text-green-400"}>{group.ideas[0].saturationIndex?.toFixed(2)}</span>
-                                        <div className="text-gray-400 text-[10px] mt-1 truncate max-w-[150px]">{group.ideas[0].businessType} {group.ideas.length > 1 ? `(+${group.ideas.length - 1} more)` : ''}</div>
-                                    </motion.div>
-                                )}
-                            </div>
-                        </AdvancedMarker>
-                    ))}
-
-                    {tempPin && (
-                        <AdvancedMarker position={tempPin}>
+            <GoogleMap
+                defaultCenter={{ lat: mapData.lat, lng: mapData.lng }}
+                defaultZoom={mapData.zoom}
+                onCameraChanged={(ev: any) => {
+                    // Update state to track position, but don't pass it back as a prop to avoid jitter
+                    setMapData({
+                        lat: ev.detail.center.lat,
+                        lng: ev.detail.center.lng,
+                        zoom: ev.detail.zoom
+                    });
+                }}
+                mapId="1f3885acd6cb624ad53f4c6c"
+                onContextmenu={handleRightClick}
+                onClick={handleMapClick}
+                disableDefaultUI={true}
+                clickableIcons={true}
+            >
+                {Object.values(groupedPins).map((group) => (
+                    <AdvancedMarker
+                        key={group.mainPinId}
+                        position={{ lat: group.lat, lng: group.lng }}
+                        onMouseEnter={() => setHoveredPinId(group.mainPinId)}
+                        onMouseLeave={() => setHoveredPinId(null)}
+                        onClick={() => setSelectedLocation({ lat: group.lat, lng: group.lng })}
+                        className="group cursor-pointer"
+                    >
+                        <div className="relative flex items-center justify-center">
                             <motion.div
-                                initial={{ scale: 0 }}
-                                animate={{ scale: 1 }}
-                                className="bg-blue-500 rounded-full w-8 h-8 flex items-center justify-center border-2 border-white/50 animate-pulse"
+                                whileHover={{ scale: 1.2 }}
+                                className="bg-purple-600 rounded-full w-8 h-8 flex items-center justify-center border-2 border-white/20 shadow-lg shadow-purple-500/50"
                             >
-                                <Pin background={'#3b82f6'} glyphColor={'#ffffff'} borderColor={'transparent'} />
+                                <Pin background={'#9333ea'} glyphColor={'#ffffff'} borderColor={'transparent'} />
                             </motion.div>
-                        </AdvancedMarker>
-                    )}
 
-                </GoogleMap>
-            </APIProvider>
+                            {/* Tooltip for Saturation Index on hover */}
+                            {hoveredPinId === group.mainPinId && group.ideas[0].saturationIndex !== null && (
+                                <motion.div
+                                    key={`tooltip-${group.mainPinId}`}
+                                    initial={{ opacity: 0, y: 10 }}
+                                    animate={{ opacity: 1, y: 0 }}
+                                    className="absolute bottom-10 bg-black/80 backdrop-blur-md rounded-2xl p-2 text-xs font-semibold text-white border border-white/20 shadow-2xl z-50 pointer-events-none min-w-[160px]"
+                                >
+                                    {group.ideas[0].visionImage && (
+                                        <div className="w-full aspect-video rounded-xl overflow-hidden mb-2 border border-white/10">
+                                            <img
+                                                src={`data:image/jpeg;base64,${group.ideas[0].visionImage}`}
+                                                alt="AI Vision"
+                                                className="w-full h-full object-cover"
+                                            />
+                                        </div>
+                                    )}
+                                    <div className="px-1">
+                                        <div className="flex justify-between items-center mb-1">
+                                            <span className="text-gray-400 text-[10px] uppercase tracking-wider font-bold">Saturation Index</span>
+                                            <span className={group.ideas[0].saturationIndex! > 5 ? "text-red-400" : "text-green-400"}>
+                                                {group.ideas[0].saturationIndex?.toFixed(2)}
+                                            </span>
+                                        </div>
+                                        <div className="text-white font-bold truncate">{group.ideas[0].businessType}</div>
+                                        {group.ideas.length > 1 && (
+                                            <div className="text-purple-400 text-[10px] mt-0.5 font-medium">+{group.ideas.length - 1} more community ideas</div>
+                                        )}
+                                    </div>
+                                </motion.div>
+                            )}
+                        </div>
+                    </AdvancedMarker>
+                ))}
+
+                {tempPin && (
+                    <AdvancedMarker position={tempPin}>
+                        <motion.div
+                            initial={{ scale: 0 }}
+                            animate={{ scale: 1 }}
+                            className="bg-blue-500 rounded-full w-8 h-8 flex items-center justify-center border-2 border-white/50 animate-pulse"
+                        >
+                            <Pin background={'#3b82f6'} glyphColor={'#ffffff'} borderColor={'transparent'} />
+                        </motion.div>
+                    </AdvancedMarker>
+                )}
+
+            </GoogleMap>
 
             {/* AI Assistant FAB */}
             <AnimatePresence>
                 {!tempPin && (
                     <motion.div
+                        key="ai-fab"
                         className="absolute bottom-10 right-10 z-50 flex flex-col items-end gap-2"
                         initial={{ opacity: 0, y: 20, scale: 0.8 }}
                         animate={{ opacity: 1, y: 0, scale: 1 }}
@@ -278,6 +437,7 @@ export default function Map() {
                 onCancel={handleCancel}
                 onSuccess={handlePinCreated}
                 onAiAction={handleAiResponse}
+                placeName={selectedPlaceName}
             />
 
             <IdeaGallery
@@ -286,6 +446,18 @@ export default function Map() {
                 location={selectedLocation}
                 ideas={activeIdeasForLocation}
                 onIdeaUpdated={fetchPins}
+            />
+            <VisionGallery
+                pins={pins}
+                onSelectPin={(pin: RenovationPin) => {
+                    const { lat, lng } = pin;
+                    setMapData(prev => ({ ...prev, lat, lng, zoom: 18 }));
+                    if (map) {
+                        map.setCenter({ lat, lng });
+                        map.setZoom(18);
+                    }
+                    setSelectedLocation({ lat, lng });
+                }}
             />
         </div>
     );

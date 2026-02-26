@@ -2,7 +2,7 @@
 
 import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { X, ChevronLeft, ChevronRight, ThumbsUp, User } from 'lucide-react';
+import { X, ChevronLeft, ChevronRight, ThumbsUp, User, Bot } from 'lucide-react';
 import { db } from '@/lib/firebase';
 import { doc, updateDoc, increment } from 'firebase/firestore';
 import { useAuth } from '@/context/AuthContext';
@@ -14,6 +14,7 @@ interface Idea {
     author?: string;
     agreementCount?: number;
     saturationIndex?: number | null;
+    visionImage?: string;
 }
 
 interface IdeaGalleryProps {
@@ -71,6 +72,7 @@ export default function IdeaGallery({ isOpen, onClose, location, ideas, onIdeaUp
     return (
         <AnimatePresence>
             <motion.div
+                key="gallery-modal"
                 initial={{ opacity: 0, scale: 0.95, y: 20 }}
                 animate={{ opacity: 1, scale: 1, y: 0 }}
                 exit={{ opacity: 0, scale: 0.95, y: 20 }}
@@ -92,10 +94,11 @@ export default function IdeaGallery({ isOpen, onClose, location, ideas, onIdeaUp
                 {/* Content */}
                 <div className="p-6 relative min-h-[250px] flex flex-col justify-between">
                     <AnimatePresence mode="wait">
-                        <motion.div
-                            key={currentIdea.id}
-                            initial={{ opacity: 0, x: 20 }}
-                            animate={{ opacity: 1, x: 0 }}
+                        {currentIdea && (
+                            <motion.div
+                                key={currentIdea.id || `temp-${currentIndex}`}
+                                initial={{ opacity: 0, x: 20 }}
+                                animate={{ opacity: 1, x: 0 }}
                             exit={{ opacity: 0, x: -20 }}
                             transition={{ duration: 0.2 }}
                             className="space-y-4"
@@ -109,6 +112,20 @@ export default function IdeaGallery({ isOpen, onClose, location, ideas, onIdeaUp
                                     <span>Proposed by <strong className="text-white">{currentIdea.author || 'Anonymous'}</strong></span>
                                 </div>
                             </div>
+
+                            {currentIdea.visionImage && (
+                                <div className="relative aspect-video rounded-xl overflow-hidden border border-white/10 shadow-lg">
+                                    <img
+                                        src={`data:image/jpeg;base64,${currentIdea.visionImage}`}
+                                        alt="Architecture Vision"
+                                        className="w-full h-full object-cover"
+                                    />
+                                    <div className="absolute top-2 right-2 bg-black/60 backdrop-blur-md px-2 py-1 rounded-lg text-[10px] font-bold text-purple-400 border border-purple-400/30 flex items-center gap-1">
+                                        <Bot className="w-3 h-3" />
+                                        AI VISION
+                                    </div>
+                                </div>
+                            )}
 
                             <p className="text-gray-300 leading-relaxed text-sm">
                                 {currentIdea.review}
@@ -134,8 +151,9 @@ export default function IdeaGallery({ isOpen, onClose, location, ideas, onIdeaUp
                                 )}
                             </div>
                         </motion.div>
-                    </AnimatePresence>
-                </div>
+                    )}
+                </AnimatePresence>
+            </div>
 
                 {/* Carousel Navigation (only if > 1 idea) */}
                 {sortedIdeas.length > 1 && (
@@ -166,6 +184,7 @@ export default function IdeaGallery({ isOpen, onClose, location, ideas, onIdeaUp
 
             {/* Backdrop overlay */}
             <motion.div
+                key="gallery-backdrop"
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
                 exit={{ opacity: 0 }}
