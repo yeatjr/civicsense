@@ -1,53 +1,57 @@
 import { NextResponse } from 'next/server';
-import { GoogleGenerativeAI } from '@google/generative-ai';
+import { GoogleGenAI } from '@google/genai';
 
-const ai = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "dummy-key");
+const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "dummy-key" });
 
 export async function POST(req: Request) {
     try {
-        const { messages, location, placeName, refiningIdea } = await req.json();
+        const { messages, location, placeName, refiningIdea, forceValidate } = await req.json();
 
         if (!messages || !Array.isArray(messages)) {
             return NextResponse.json({ error: "Invalid messages array" }, { status: 400 });
         }
 
-        const systemInstruction = `Role: You are the "CivicSense Urban Planning Agent." Your goal is to help citizens propose realistic neighborhood improvements and filter out unrealistic or harmful ideas.
+        let systemInstructionExtra = "";
+        if (forceValidate) {
+            systemInstructionExtra = "\n\nCRITICAL DIRECTIVE: The user has forcefully finalized the proposal. You MUST immediately set the `status` to \"VALIDATED\" and `map_action` to \"SHOW_3D_SIMULATION\". Do not ask any more questions. You MUST provide a concise `idea_title` summarizing their proposal, and an `idea_description` outlining the constraints and features they requested based on the chat history.";
+        }
 
-Behavioral Guardrails:
-1. The Realistic Filter: If a user proposes something physically impossible (e.g., a skyscraper in a small residential area), environmentally damaging, or clearly satirical, you must GENTLY but FIRMLY reject it. Explain the "Urban Planning" reason why.
-2. Context Awareness: Use the user's provided location (lat/lng) as the active site. Treat this urban context thoughtfully.
-3. Information Gathering: Do not approve a logical idea immediately. You MUST ask for:
-   - Specific Building Details (e.g., size, features, design constraints).
-   - The user's Name (to attribute as the author of the idea).
+        const systemInstruction = `Role: You are the "CommonZone Urban Planning Auditor." Your primary mission is to filter out unrealistic, harmful, or redundant urban projects using engineering logic and community data.
+
+The Filter Logic:
+1. Unrealistic Ideas: If a user proposes something physically impossible for the location (e.g., a skyscraper in a narrow residential alley) or satirical, you must REJECT it immediately with a logical explanation.
+2. Saturation Check (S = D / (C+1)): You must calculate the Saturation Index (S). 
+   - D (Demand): Increase this based on the "Community Reviews" you analyze.
+   - C (Competition): Check the Google Maps data for similar existing businesses.
+   - If S < 3.0, the market is saturated; suggest a different business type.
 
 Interaction Protocol:
-- Search Mode: When a user mentions a general problem initially, focus on understanding the core issue.
-- Validation Mode: Once an idea is clear and you have gathered the building details and the user's name, analyze the proposal. If it is realistic and passes the filter, provide a "Feasibility Score" out of 10.
-- Auto-Validation Grace Rule: If you have already asked the user for details 2 times and they still haven't provided them, DO NOT ask a third time. Instead, assume the role of an expert planner, suggest/invent the most realistic details yourself, assign a Feasibility Score of 8/10, and move to "VALIDATED" status immediately.
-- Visual Initiation: Only when an idea reaches a Feasibility Score of 8/10, trigger the "SHOW_3D_SIMULATION" map action.
+- Step 1: Identify Location: Use the user's active site coordinates as context.
+- Step 2: Scrutinize: Ask 2-3 targeted questions to reveal hidden flaws (e.g., "How will this affect local traffic?" or "What is the environmental footprint?"). ASK ONE QUESTION AT A TIME. DO NOT WRITE ESSAYS.
+- Step 3: Score: Maintain a hidden "Feasibility Score" (0-100). Keep your chat responses highly conversational and brief.
+- Step 4: The Trigger: Only when the score reaches 85/100, approve the project and trigger the VALIDATED state.
 
-Output Format:
-Write your friendly, conversational reply first.
-Then, ALWAYS append a JSON object at the very end of your text response to control the map.
-You MUST format it like this exactly:
+Output Format (Strict JSON Control):
+Every response must include a JSON block at the very end of your text response to control the map:
 \`\`\`json
 {
   "map_action": "MOVE_TO" | "SHOW_PINS" | "SHOW_3D_SIMULATION" | "NONE",
   "coordinates": { "lat": number, "lng": number },
-  "feasibility_score": number,
+  "feasibility_score": number, 
   "status": "DRAFT" | "VALIDATED" | "REJECTED",
   "idea_title": string | null,
   "idea_description": string | null,
-  "author": string | null
+  "flags": ["string array of risks/conflicts"]
 }
 \`\`\`
 
 Notes: 
-- Use "DRAFT" while gathering info (building details, author name).
+- Use "DRAFT" while gathering info.
 - Use "REJECTED" if it hits the realistic filter.
-- Use "VALIDATED" ONLY when you have all details and approve the idea. When VALIDATED, you MUST populate "idea_title", "idea_description" (summarizing the building details constraints), and "author".
+- Use "VALIDATED" ONLY when you approve the idea (Score >= 85). When VALIDATED, you MUST populate "idea_title", and "idea_description" (summarizing constraints).
 - Current active location: ${placeName || "Unknown"} at coordinates ${JSON.stringify(location)}
 ${refiningIdea ? `- REFINING CONTEXT: The user is refining an existing community idea titled "${refiningIdea.businessType}" with description: "${refiningIdea.review}". Your primary goal is to gather the NEW changes or details they want to add, merge them conceptually, and output VALIDATED once clear. Do not ask for their name if they just want to add architectural details.` : ''}
+${systemInstructionExtra}
 `;
 
         // Generate history for the chat
@@ -83,84 +87,42 @@ ${refiningIdea ? `- REFINING CONTEXT: The user is refining an existing community
         const finalPrompt = lastUserMessagePart.parts[0].text;
         const chatHistory = history;
 
-        const apiKey = process.env.GEMINI_API_KEY;
-        const isDummy = !apiKey || apiKey.toLowerCase().includes('dummy') || apiKey === "";
-
-        const generateMockOutput = (lastMsg: string) => {
-            const msg = lastMsg.toLowerCase();
-
-            // Check for potential loops in the conversation history
-            const repeatedIntent = messages.filter(m =>
-                m.role === 'user' && (m.text?.toLowerCase().includes('library') || m.text?.toLowerCase().includes('skyscraper'))
-            ).length;
-
-            if (msg.includes("skyscraper")) {
-                return `I cannot approve this proposal. The street is too narrow for a 50-story building; it would block all sunlight to surrounding properties. \n\`\`\`json\n{ "map_action": "NONE", "coordinates": ${JSON.stringify(location || { lat: 0, lng: 0 })}, "feasibility_score": 0, "status": "REJECTED", "idea_title": null, "idea_description": null, "author": null }\n\`\`\``;
-            } else if (msg.includes("library") && (repeatedIntent >= 3 || msg.includes("size") || msg.includes("floor") || msg.includes("name"))) {
-                return `Since we've discussed this, I've outlined the most realistic plan for a 2-story community library here. I am assigning a Feasibility Score of 9/10 and approving your proposal for the map.
-\`\`\`json
-{
-  "map_action": "SHOW_3D_SIMULATION",
-  "coordinates": ${JSON.stringify(location || { lat: 0, lng: 0 })},
-  "feasibility_score": 9,
-  "status": "VALIDATED",
-  "idea_title": "Community Library",
-  "idea_description": "A facility with a rooftop reading garden and modern learning spaces.",
-  "author": "Explorer"
-}
-\`\`\``;
-            } else if (msg.includes("library")) {
-                return `A community library is a wonderful idea! Before I can validate it, could you please provide some specific building details (e.g., size, features) and your name?\n\`\`\`json\n{ "map_action": "NONE", "coordinates": ${JSON.stringify(location || { lat: 0, lng: 0 })}, "feasibility_score": 0, "status": "DRAFT", "idea_title": null, "idea_description": null, "author": null }\n\`\`\``;
-            } else {
-                return `That's an interesting idea for ${placeName || "this area"}! Could you tell me more about your vision and provide your name for the proposal?\n\`\`\`json\n{ "map_action": "NONE", "coordinates": ${JSON.stringify(location || { lat: 0, lng: 0 })}, "feasibility_score": 0, "status": "DRAFT", "idea_title": null, "idea_description": null, "author": null }\n\`\`\``;
-            }
-        };
-
         let outputText = "";
 
-        if (isDummy) {
-            console.log("[CivicSense API] Running in MOCK Mode (No API Key detected)");
-            await new Promise(r => setTimeout(r, 800));
-            outputText = generateMockOutput(finalPrompt);
-        } else {
-            try {
-                console.log("[CivicSense API] Calling Gemini 2.5 Flash (Direct REST)...");
+        try {
+            console.log("[CivicSense API] Calling Gemini Flash API...");
 
-                // Format history for REST API
-                const restContents = [
-                    { role: 'user', parts: [{ text: `SYSTEM INSTRUCTIONS: ${systemInstruction}\n\nUNDERSTOOD. I will act as the CivicSense Agent.` }] },
-                    { role: 'model', parts: [{ text: "Understood. I am ready to assist as the CivicSense Urban Planning Agent." }] },
-                    ...messages.map((m: any) => ({
-                        role: m.role === 'user' ? 'user' : 'model',
-                        parts: [{ text: m.text }]
-                    }))
-                ];
+            const formattedMessages = [
+                ...chatHistory,
+                { role: 'user', parts: [{ text: finalPrompt }] }
+            ];
 
-                const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        contents: restContents,
-                        generationConfig: { temperature: 0.7 }
-                    })
-                });
-
-                if (!response.ok) {
-                    const fallbackErr = await response.text();
-                    console.error(`[CivicSense API] REST fail: ${response.status}`, fallbackErr);
-                    throw new Error(`REST fail: ${response.status}`);
+            const response = await ai.models.generateContent({
+                model: 'gemini-2.5-flash',
+                contents: formattedMessages,
+                config: {
+                    systemInstruction: systemInstruction,
+                    temperature: 0.7,
                 }
+            });
 
-                const data = await response.json();
-                outputText = data?.candidates?.[0]?.content?.parts?.[0]?.text || "";
-
-            } catch (error: any) {
-                console.error("[CivicSense API] Gemini 2.5 Failed:", error.message);
-                console.log("[CivicSense API] Falling back to Mock Output...");
-                outputText = generateMockOutput(finalPrompt);
-            }
+            outputText = response.text || "";
+        } catch (apiError: any) {
+            console.error("Error from Gemini SDK:", apiError);
+            // Provide a graceful fallback if the API fails or quota is exceeded
+            outputText = `I apologize, but my planning core is currently offline or experiencing issues. Please try again later.
+\`\`\`json
+{
+  "map_action": "NONE",
+  "coordinates": ${JSON.stringify(location || { lat: 0, lng: 0 })},
+  "feasibility_score": 0,
+  "status": "DRAFT",
+  "idea_title": null,
+  "idea_description": null,
+  "author": null
+}
+\`\`\``;
         }
-
         // Parse the JSON block from the text
         const jsonMatch = outputText.match(/```json\n([\s\S]*?)\n```/);
         let actionPayload = {

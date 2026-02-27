@@ -2,9 +2,9 @@
 
 import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { X, ChevronLeft, ChevronRight, ThumbsUp, User, Bot, MapPin, Activity, Image as ImageIcon } from 'lucide-react';
+import { X, ChevronLeft, ChevronRight, ThumbsUp, User, Bot, Trash2, MapPin, Activity, Image as ImageIcon } from 'lucide-react';
 import { db } from '@/lib/firebase';
-import { doc, updateDoc, increment } from 'firebase/firestore';
+import { doc, updateDoc, increment, deleteDoc } from 'firebase/firestore';
 import { useAuth } from '@/context/AuthContext';
 import { getImageSrc } from '@/lib/utils';
 
@@ -21,6 +21,8 @@ interface Idea {
     streetViewUrl?: string;
     satelliteUrl?: string;
     parentIdeaId?: string;
+    userId?: string;
+    flags?: string[];
 }
 
 interface IdeaGalleryProps {
@@ -93,6 +95,23 @@ export default function IdeaGallery({ isOpen, onClose, location, ideas, onIdeaUp
             setUpvotingIdeaId(null);
         }
     };
+
+    const handleDelete = async (ideaId: string) => {
+        if (!window.confirm("Are you sure you want to delete your proposal entirely?")) return;
+        try {
+            await deleteDoc(doc(db, 'pins', ideaId));
+            onIdeaUpdated();
+            if (sortedIdeas.length <= 1) {
+                onClose();
+            } else {
+                setCurrentIndex(0);
+            }
+        } catch (error) {
+            console.error("Error deleting idea:", error);
+        }
+    };
+
+    const isOwner = !!(user && currentIdea?.userId === user.uid);
 
     return (
         <AnimatePresence>
@@ -203,6 +222,32 @@ export default function IdeaGallery({ isOpen, onClose, location, ideas, onIdeaUp
                                         </button>
                                     )}
                                 </div>
+                                <div className="flex items-center gap-2 justify-between">
+                                    {currentIdea.saturationIndex && (
+                                        <div className={`text-[10px] px-3 py-2 rounded-xl font-black shadow-inner flex-1 text-center ${currentIdea.saturationIndex >= 85 ? 'bg-green-500/20 text-green-400' : 'bg-yellow-500/20 text-yellow-500'}`}>
+                                            SCORE: {Math.round(currentIdea.saturationIndex)}/100
+                                        </div>
+                                    )}
+                                    {isOwner && (
+                                        <button
+                                            onClick={() => handleDelete(currentIdea.id)}
+                                            className="flex items-center justify-center gap-2 px-3 py-2 rounded-xl font-bold text-[10px] bg-red-500/10 hover:bg-red-500/30 text-red-400 transition-all border border-red-500/20"
+                                        >
+                                            <Trash2 className="w-3.5 h-3.5" />
+                                            DELETE
+                                        </button>
+                                    )}
+                                </div>
+                                {currentIdea.flags && currentIdea.flags.length > 0 && (
+                                    <div className="flex flex-wrap gap-2 pt-2 border-t border-white/5 mt-2">
+                                        <span className="text-[10px] text-red-400 font-bold uppercase tracking-wider py-1 mr-1">Risks: </span>
+                                        {currentIdea.flags.map((flag, idx) => (
+                                            <span key={idx} className="bg-red-500/10 border border-red-500/20 text-red-300 text-[9px] uppercase font-bold px-2 py-1 rounded-md tracking-wider">
+                                                {flag}
+                                            </span>
+                                        ))}
+                                    </div>
+                                )}
                             </div>
                         </motion.div>
 

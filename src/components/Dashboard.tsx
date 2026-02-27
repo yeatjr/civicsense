@@ -4,7 +4,7 @@ import React, { useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
 import { collection, onSnapshot, query, orderBy, limit } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
-import { Activity, MapPin, TrendingUp, AlertTriangle, ChevronRight, Loader2, LogIn, LogOut, Image as ImageIcon } from 'lucide-react';
+import { Activity, MapPin, TrendingUp, LogIn, LogOut, Image as ImageIcon } from 'lucide-react';
 import { useAuth } from '@/context/AuthContext';
 import { getImageSrc } from '@/lib/utils';
 
@@ -15,8 +15,6 @@ interface DashboardProps {
 
 export default function Dashboard({ onSelectPin, className }: DashboardProps) {
     const [recentPins, setRecentPins] = useState<any[]>([]);
-    const [reportData, setReportData] = useState<any>(null);
-    const [loadingReport, setLoadingReport] = useState(false);
     const { user, loginWithGoogle, logout } = useAuth();
 
     useEffect(() => {
@@ -30,28 +28,14 @@ export default function Dashboard({ onSelectPin, className }: DashboardProps) {
         return () => unsubscribe();
     }, []);
 
-    const generateReport = async () => {
-        setLoadingReport(true);
-        try {
-            // For demo, we just use default lat/lng, in a real app this would follow map center
-            const res = await fetch('/api/report?lat=40.7128&lng=-74.0060');
-            const data = await res.json();
-            setReportData(data.report);
-        } catch (error) {
-            console.error(error);
-        } finally {
-            setLoadingReport(false);
-        }
-    };
-
     return (
-        <div className={`absolute top-4 left-4 z-[110] w-72 md:w-80 flex flex-col gap-3 pointer-events-auto ${className || ''}`}>
+        <div className={`absolute top-4 left-4 z-[110] w-80 md:w-96 max-h-[calc(100vh-2rem)] flex flex-col gap-4 pointer-events-none ${className || ''}`}>
 
             {/* Header Widget - RESTORED TO ORIGINAL STYLE */}
             <motion.div
                 initial={{ opacity: 0, y: -20 }}
                 animate={{ opacity: 1, y: 0 }}
-                className="backdrop-blur-xl bg-black/40 border border-white/10 rounded-2xl p-5 shadow-2xl pointer-events-auto flex justify-between items-start"
+                className="backdrop-blur-xl bg-black/40 border border-white/10 rounded-2xl p-5 shadow-2xl pointer-events-auto flex justify-between items-start shrink-0"
             >
                 <div>
                     <div className="flex items-center gap-3 mb-2">
@@ -101,7 +85,8 @@ export default function Dashboard({ onSelectPin, className }: DashboardProps) {
             <motion.div
                 initial={{ opacity: 0, x: -20 }}
                 animate={{ opacity: 1, x: 0 }}
-                className="backdrop-blur-xl bg-black/40 border border-white/10 rounded-2xl shadow-2xl pointer-events-auto flex flex-col overflow-hidden max-h-[45vh]"
+                transition={{ delay: 0.1 }}
+                className="backdrop-blur-xl bg-black/40 border border-white/10 rounded-2xl p-5 shadow-2xl pointer-events-auto flex flex-col gap-3 max-h-[50vh] overflow-y-auto custom-scrollbar"
             >
                 <div className="p-4 border-b border-white/5 bg-black/40 backdrop-blur-md sticky top-0 z-10 flex justify-between items-center">
                     <h2 className="text-xs font-black text-white/90 flex items-center gap-2 uppercase tracking-[0.2em]">
@@ -167,57 +152,6 @@ export default function Dashboard({ onSelectPin, className }: DashboardProps) {
                     )}
                 </div>
             </motion.div>
-
-            {/* Needs Report Widget */}
-            <motion.div
-                initial={{ opacity: 0, y: 20 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: 0.2 }}
-                className="backdrop-blur-xl bg-black/40 border border-white/10 rounded-2xl p-5 shadow-2xl pointer-events-auto"
-            >
-                <div className="flex justify-between items-center mb-4">
-                    <h2 className="text-sm font-semibold text-white/90 flex items-center gap-2">
-                        <AlertTriangle className="w-4 h-4 text-yellow-400" />
-                        Needs Analysis
-                    </h2>
-                    <button
-                        onClick={generateReport}
-                        disabled={loadingReport}
-                        className="text-[10px] font-bold bg-white/10 hover:bg-white/20 text-white px-3 py-1.5 rounded-lg transition-colors flex items-center gap-1 disabled:opacity-50"
-                    >
-                        {loadingReport ? <Loader2 className="w-3 h-3 animate-spin" /> : 'Generate'}
-                        {!loadingReport && <ChevronRight className="w-3 h-3" />}
-                    </button>
-                </div>
-
-                {reportData ? (
-                    <div className="space-y-3">
-                        <div className="bg-gradient-to-br from-purple-500/10 to-blue-500/10 p-3 rounded-xl border border-white/5">
-                            <span className="text-[10px] uppercase tracking-wider text-purple-400 font-bold block mb-1">Top Recommendation</span>
-                            <p className="text-sm text-white/90 font-medium leading-snug">{reportData.topRecommendation}</p>
-                        </div>
-
-                        <div className="bg-white/5 p-3 rounded-xl border border-white/5">
-                            <span className="text-[10px] uppercase tracking-wider text-blue-400 font-bold block mb-1">Community Sentiment</span>
-                            <p className="text-xs text-gray-300">{reportData.communitySentiment}</p>
-                        </div>
-
-                        <div className="flex flex-wrap gap-2 mt-2">
-                            {reportData.marketGaps?.map((gap: string, i: number) => (
-                                <span key={i} className="text-[10px] bg-black/50 border border-white/10 text-gray-300 px-2 py-1 rounded-md">
-                                    {gap}
-                                </span>
-                            ))}
-                        </div>
-                    </div>
-                ) : (
-                    <div className="py-6 flex flex-col items-center justify-center text-center opacity-50">
-                        <MapPin className="w-8 h-8 text-gray-400 mb-2" />
-                        <p className="text-xs text-gray-400">Click generate to analyze local pins with Gemini API</p>
-                    </div>
-                )}
-            </motion.div>
-
         </div>
     );
 }

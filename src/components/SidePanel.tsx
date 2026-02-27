@@ -38,13 +38,19 @@ export default function SidePanel({ isOpen, location, onCancel, onSuccess, onAiA
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const { user, loginWithGoogle } = useAuth();
 
+    const activeLocationRef = useRef<string>("");
+
     // Initial greeting when panel opens
     useEffect(() => {
-        if (isOpen) {
+        if (isOpen && location) {
+            const newLocationStr = `${location.lat.toFixed(5)},${location.lng.toFixed(5)}`;
+            const isDifferentLocation = activeLocationRef.current !== "" && activeLocationRef.current !== newLocationStr;
+            activeLocationRef.current = newLocationStr;
+
             const isInitial = messages.length === 0;
             const isScanning = messages.length === 1 && messages[0].text.includes("scanning");
 
-            if (isInitial || isScanning) {
+            if (isInitial || isScanning || status === 'VALIDATED' || isDifferentLocation || status === 'REJECTED') {
                 const isRealName = placeName && placeName !== "Detecting location...";
                 let greeting = isRealName
                     ? `Hi! I see you're interested in **${placeName}**. What's your vision for this location?`
@@ -58,16 +64,18 @@ export default function SidePanel({ isOpen, location, onCancel, onSuccess, onAiA
                 if (isInitial || (isRealName && isScanning)) {
                     setMessages([{ role: 'model', text: greeting }]);
                 }
+                
+                setStatus('DRAFT');
+                setFeasibility(null);
+                setSimulation(false);
+                setGeneratedVision(null);
+                setInput('');
             }
-            setStatus('DRAFT');
-            setFeasibility(null);
-            setSimulation(false);
-            setGeneratedVision(null);
         }
+
         if (!isOpen) {
-            setMessages([]);
-            setInput('');
-            setError('');
+            // Keep the chat history intact if closed, but hide any active loading state
+            setLoading(false);
         }
     }, [isOpen, placeName]);
 
@@ -75,14 +83,14 @@ export default function SidePanel({ isOpen, location, onCancel, onSuccess, onAiA
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     }, [messages]);
 
-    const handleSend = async (e: React.FormEvent) => {
-        e.preventDefault();
-        if (!input.trim() || !location) return;
+    const handleSend = async (e?: React.FormEvent, forceSubmit?: boolean) => {
+        if (e) e.preventDefault();
+        if ((!input.trim() && !forceSubmit) || !location) return;
 
-        const userText = input.trim();
+        const userText = forceSubmit ? "I have provided enough details. Please finalize and VALIDATE this proposal now." : input.trim();
         const newMessages = [...messages, { role: 'user' as const, text: userText }];
         setMessages(newMessages);
-        setInput('');
+        if (!forceSubmit) setInput('');
         setLoading(true);
         setError('');
 
@@ -90,7 +98,7 @@ export default function SidePanel({ isOpen, location, onCancel, onSuccess, onAiA
             const res = await fetch('/api/chat', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ messages: newMessages, location, placeName, refiningIdea })
+                body: JSON.stringify({ messages: newMessages, location, placeName, refiningIdea, forceValidate: forceSubmit })
             });
 
             if (!res.ok) throw new Error('Failed to get response');
@@ -107,6 +115,7 @@ export default function SidePanel({ isOpen, location, onCancel, onSuccess, onAiA
                 if (action.feasibility_score > 0) setFeasibility(action.feasibility_score);
 
                 if (action.status === 'VALIDATED') {
+                    console.log("[SidePanel] Entered VALIDATED block");
                     setVisionLoading(true);
                     setStatusText('Capturing map perspective...');
 
@@ -117,7 +126,10 @@ export default function SidePanel({ isOpen, location, onCancel, onSuccess, onAiA
 
                     const fetchBase64 = async (url: string) => {
                         try {
-                            const r = await fetch(url);
+                            const controller = new AbortController();
+                            const timeoutId = setTimeout(() => controller.abort(), 3000);
+                            const r = await fetch(url, { signal: controller.signal });
+                            clearTimeout(timeoutId);
                             if (!r.ok) return null;
                             const blob = await r.blob();
                             return new Promise<string>((resolve) => {
@@ -135,9 +147,37 @@ export default function SidePanel({ isOpen, location, onCancel, onSuccess, onAiA
                     let analysisData = null;
                     try {
                         setStatusText('AI: Analyzing urban environment...');
+                        const controller = new AbortController();
+                        const timeoutId = setTimeout(() => controller.abort(), 15000);
+
+                        const compressImage = (base64Str: string, maxWidth = 800, quality = 0.6): Promise<string> => {
+                            return new Promise((resolve) => {
+                                const img = new Image();
+                                img.onload = () => {
+                                    const canvas = document.createElement('canvas');
+                                    const scale = Math.min(1, maxWidth / img.width);
+                                    canvas.width = img.width * scale;
+                                    canvas.height = img.height * scale;
+                                    const ctx = canvas.getContext('2d');
+                                    ctx?.drawImage(img, 0, 0, canvas.width, canvas.height);
+                                    const compressedDataUrl = canvas.toDataURL('image/jpeg', quality);
+                                    const resultBase64 = compressedDataUrl.split(',')[1];
+                                    console.log(`[CivicSense] Image compressed from ~${Math.round(base64Str.length / 1024)}KB to ~${Math.round(resultBase64.length / 1024)}KB`);
+                                    resolve(resultBase64);
+                                };
+                                img.onerror = () => {
+                                    console.error("[CivicSense] Canvas compression failed, returning original image");
+                                    resolve(base64Str); // Fallback to original if failure
+                                };
+                                const mimeType = base64Str.startsWith('iVBORw0KGgo') ? 'image/png' : 'image/jpeg';
+                                img.src = `data:${mimeType};base64,${base64Str}`;
+                            });
+                        };
+
                         const visionRes = await fetch('/api/vision/generate', {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
+                            signal: controller.signal,
                             body: JSON.stringify({
                                 text: action.idea_description || userText,
                                 location,
@@ -147,15 +187,19 @@ export default function SidePanel({ isOpen, location, onCancel, onSuccess, onAiA
                                 placeTypes: []
                             })
                         });
+                        clearTimeout(timeoutId);
+
                         const visionData = await visionRes.json();
+                        console.log("[SidePanel] Vision API returned data:", !!visionData);
                         if (visionData.success && visionData.visionUrl) {
                             finalVisionImage = visionData.visionUrl;
                             analysisData = visionData.analysis;
                             setGeneratedVision(visionData.visionUrl);
                         }
                     } catch (vErr) {
-                        console.error("Vision Generation failed:", vErr);
+                        console.error("[SidePanel] Vision Generation failed:", vErr);
                     } finally {
+                        console.log("[SidePanel] Leaving Vision Block");
                         setVisionLoading(false);
                         setStatusText('');
                     }
@@ -165,17 +209,18 @@ export default function SidePanel({ isOpen, location, onCancel, onSuccess, onAiA
                     const linkedPlaceId = `civic_${location.lat.toFixed(5)}_${location.lng.toFixed(5)}`;
 
                     const pinPayload = {
-                        lat: location.lat,
-                        lng: location.lng,
+                        lat: location.lat || null,
+                        lng: location.lng || null,
                         review: action.idea_description || "Agent Chat History Logged",
                         businessType: action.idea_title || "New Proposal",
                         author: user?.displayName || user?.email || "Anonymous",
                         agreementCount: 0,
                         saturationIndex: action.feasibility_score || 5, // Feasibility replaces Saturation temporarily for demo
-                        visionImage: visionUrl,
+                        visionImage: finalVisionImage || null,
                         streetViewUrl: svUrl,
                         satelliteUrl: satUrl,
-                        analysis: analysisData,
+                        analysis: analysisData || null,
+                        flags: action.flags || [],
                         createdAt: new Date(),
                         userId: user?.uid || null,
                         parentIdeaId: refiningIdea ? refiningIdea.id : null
@@ -184,11 +229,11 @@ export default function SidePanel({ isOpen, location, onCancel, onSuccess, onAiA
                     const commentPayload = {
                         placeId: linkedPlaceId,
                         placeName: action.idea_title || placeName || "CivicSense Proposal",
-                        text: action.idea_description || userText,
+                        text: action.idea_description || userText || null,
                         author: user?.displayName || "Civic User",
                         likes: 0,
-                        imageStatus: visionUrl ? 'done' : 'failed',
-                        imageBase64: visionUrl,
+                        imageStatus: finalVisionImage ? 'done' : 'failed',
+                        imageBase64: finalVisionImage || null,
                         environmentAnalysis: analysisData?.envAnalysis || null,
                         satelliteAnalysis: analysisData?.satelliteAnalysis || null,
                         timestamp: new Date(),
@@ -198,45 +243,70 @@ export default function SidePanel({ isOpen, location, onCancel, onSuccess, onAiA
                     const placePayload = {
                         name: action.idea_title || placeName || "CivicSense Proposal",
                         address: placeName || "Civic Location",
-                        latitude: location.lat,
-                        longitude: location.lng,
+                        latitude: location.lat || null,
+                        longitude: location.lng || null,
                         lastUpdated: new Date(),
                         isCivicSense: true
                     };
 
-                    await Promise.all([
-                        addDoc(collection(db, 'pins'), pinPayload),
-                        addDoc(collection(db, 'comments'), commentPayload),
-                        // use setDoc if we want a specific ID, but firestore v9 web uses different syntax
-                        // Let's use the standard doc/setDoc pattern for places to use our custom placeId
-                    ]);
+                    console.log("[SidePanel] Payload generated, starting Firestore inserts...");
 
-                    await setDoc(doc(db, 'places', linkedPlaceId), placePayload, { merge: true });
+                    try {
+                        const saveToDb = async () => {
+                            await Promise.all([
+                                addDoc(collection(db, 'pins'), pinPayload),
+                                addDoc(collection(db, 'comments'), commentPayload),
+                            ]);
+                            await setDoc(doc(db, 'places', linkedPlaceId), placePayload, { merge: true });
+                        };
+
+                        // Brutally enforce a 5-second timeout so the UI never hangs if offline or blocked
+                        await Promise.race([
+                            saveToDb(),
+                            new Promise((_, reject) => setTimeout(() => reject(new Error('Firebase save timeout exceeded')), 5000))
+                        ]);
+                        console.log("[SidePanel] Pins & Comments successfully saved to database.");
+                    } catch (dbErr: any) {
+                        console.error("[SidePanel] FIREBASE ERROR OR TIMEOUT:", dbErr);
+                        setError(`Database Error: ${dbErr.message || 'Failed to save.'} Please check your Firebase Database Security Rules. They might be set to 'false' or expired.`);
+                        setStatus('DRAFT');
+                        return; // Halt here so the user sees the error and the panel does not close
+                    }
 
 
                     // Add vision to chat history before closing or staying
-                    if (visionUrl) {
+                    if (finalVisionImage) {
                         setMessages(prev => [...prev, {
                             role: 'model',
                             text: 'I have generated a 3D architecture vision for your proposal:',
-                            imageBase64: visionUrl
+                            imageBase64: finalVisionImage
+                        }]);
+                    } else {
+                        setMessages(prev => [...prev, {
+                            role: 'model',
+                            text: 'Your proposal has been successfully saved to the map! (Note: 3D Vision generation is currently offline due to free-tier quotas).'
                         }]);
                     }
 
-                    // Delay closing or let user see it
-                    // onSuccess();
+                    // Auto-close the panel after 3 seconds to let them see the message and refresh pins
+                    setTimeout(() => {
+                        onSuccess();
+                    }, 3500);
                 }
 
                 if (action.map_action === 'SHOW_3D_SIMULATION') {
-                    console.log("3D Simulation Triggered at", action.coordinates);
+                    console.log("[SidePanel] 3D Simulation Triggered at", action.coordinates);
                     setSimulation(true);
                 }
+
+                console.log("[SidePanel] Finished processing action successfully.");
             }
 
         } catch (err: any) {
-            console.error(err);
+            console.error("[SidePanel] MAIN CATCH BLOCK HIT:", err);
             setError(err.message || 'An error occurred.');
         } finally {
+            console.log("[SidePanel] Finally block executing, unlocking load state");
             setLoading(false);
         }
     };
@@ -392,10 +462,29 @@ export default function SidePanel({ isOpen, location, onCancel, onSuccess, onAiA
                     )}
 
 
-
                     {/* Input Area */}
-                    <div className="p-5 border-t border-white/10 bg-black/20">
-                        <form onSubmit={handleSend} className="relative">
+                    <div className="p-4 border-t border-white/10 bg-black/40 flex flex-col gap-2">
+                        {status === 'DRAFT' && messages.length > 1 && (
+                            <div className="flex gap-2">
+                                <button
+                                    type="button"
+                                    onClick={() => onCancel()}
+                                    disabled={loading}
+                                    className="flex-1 py-2 bg-red-600/30 hover:bg-red-600/50 rounded-full text-white text-[10px] font-bold tracking-widest uppercase shadow-lg transition-all"
+                                >
+                                    Restart
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => handleSend(undefined, true)}
+                                    disabled={loading}
+                                    className="flex-[2] py-2 bg-gradient-to-r from-purple-600/60 to-blue-600/60 hover:from-purple-500 hover:to-blue-500 rounded-full text-white text-[10px] font-bold tracking-widest uppercase shadow-lg transition-all"
+                                >
+                                    Submit Idea Now
+                                </button>
+                            </div>
+                        )}
+                        <form onSubmit={(e) => handleSend(e)} className="relative">
                             <input
                                 type="text"
                                 placeholder={status === 'VALIDATED' ? "Approved..." : (user ? "Type your answer..." : "Chat as Guest...")}

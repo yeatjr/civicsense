@@ -1,11 +1,11 @@
 'use client';
 
 import React, { useState, useCallback, useEffect } from 'react';
-import { APIProvider, Map as GoogleMap, AdvancedMarker, Pin, useMap, useMapsLibrary } from '@vis.gl/react-google-maps';
-import { collection, query, onSnapshot } from 'firebase/firestore';
+import { APIProvider, Map as GoogleMap, AdvancedMarker, Pin, useMap, useMapsLibrary, MapControl, ControlPosition } from '@vis.gl/react-google-maps';
+import { collection, query, getDocs, onSnapshot } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Bot, MessageSquare, Flag } from 'lucide-react';
+import { Bot, MessageSquare, Flag, Search } from 'lucide-react';
 import SidePanel from './SidePanel';
 import IdeaGallery from './IdeaGallery';
 import Dashboard from './Dashboard';
@@ -105,6 +105,43 @@ const darkTheme = [
     }
 ];
 
+function MapSearch({ onPlaceSelect }: { onPlaceSelect: (place: google.maps.places.PlaceResult) => void }) {
+    const inputRef = React.useRef<HTMLInputElement>(null);
+    const places = useMapsLibrary('places');
+
+    useEffect(() => {
+        if (!places || !inputRef.current) return;
+        const autocomplete = new places.Autocomplete(inputRef.current, { fields: ['geometry', 'name'] });
+
+        const listener = autocomplete.addListener('place_changed', () => {
+            const place = autocomplete.getPlace();
+            if (place.geometry?.location) {
+                onPlaceSelect(place);
+            }
+        });
+
+        return () => {
+            google.maps.event.removeListener(listener);
+        };
+    }, [places, onPlaceSelect]);
+
+    return (
+        <MapControl position={ControlPosition.TOP_CENTER}>
+            <div className="mt-4 md:mt-6 p-1 bg-black/60 backdrop-blur-md rounded-full border border-white/20 shadow-2xl flex items-center pr-4 transition-all focus-within:ring-2 focus-within:ring-purple-500/50">
+                <div className="w-10 h-10 rounded-full bg-white/10 flex items-center justify-center shrink-0 ml-1">
+                    <Search className="w-4 h-4 text-purple-300" />
+                </div>
+                <input
+                    ref={inputRef}
+                    type="text"
+                    placeholder="Search city or location..."
+                    className="bg-transparent text-white text-sm w-48 md:w-80 px-4 py-2 outline-none placeholder-gray-400 font-medium"
+                />
+            </div>
+        </MapControl>
+    );
+}
+
 export default function Map() {
     return (
         <APIProvider
@@ -119,8 +156,9 @@ export default function Map() {
 function MapInner() {
     const [pins, setPins] = useState<RenovationPin[]>([]);
     const [tempPin, setTempPin] = useState<{ lat: number, lng: number } | null>(null);
+    const [pendingPin, setPendingPin] = useState<{ lat: number, lng: number } | null>(null);
     const [hoveredPinId, setHoveredPinId] = useState<string | null>(null);
-    const [mapData, setMapData] = useState({ lat: 40.7128, lng: -74.0060, zoom: 13 });
+    const [mapData, setMapData] = useState({ lat: 3.1390, lng: 101.6869, zoom: 6 });
     const [selectedLocation, setSelectedLocation] = useState<{ lat: number, lng: number } | null>(null);
     const [selectedIdeaId, setSelectedIdeaId] = useState<string | null>(null);
     const [selectedPlaceName, setSelectedPlaceName] = useState<string | null>(null);
@@ -128,6 +166,11 @@ function MapInner() {
 
     // Auth context
     const { user, loginWithGoogle } = useAuth();
+
+    // Map hooks must be declared before callbacks
+    const map = useMap();
+    const placesLib = useMapsLibrary('places');
+    const geocodingLib = useMapsLibrary('geocoding');
 
     const handleAiResponse = (action: any) => {
         if (action.map_action === "MOVE_TO" && action.coordinates) {
@@ -139,32 +182,52 @@ function MapInner() {
         }
     };
 
-    useEffect(() => {
-        // Real-time pins synchronization
-        const q = query(collection(db, 'pins'));
-        const unsubscribe = onSnapshot(q, (snapshot) => {
-            const fetchedPins = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as RenovationPin));
-            console.log("[CivicSense] Real-time pins updated:", fetchedPins.length);
-            setPins(fetchedPins);
-        });
+    const handleSearchSelect = useCallback((place: google.maps.places.PlaceResult) => {
+        if (place.geometry?.location) {
+            const lat = place.geometry.location.lat();
+            const lng = place.geometry.location.lng();
+            setMapData(prev => ({ ...prev, lat, lng, zoom: 14 }));
+            map?.panTo({ lat, lng });
+            map?.setZoom(14);
+        }
+    }, [map]);
 
+    const fetchPins = async () => {
+        try {
+            const querySnapshot = await getDocs(collection(db, 'pins'));
+            const fetchedPins: RenovationPin[] = [];
+            querySnapshot.forEach((doc) => {
+                fetchedPins.push({ id: doc.id, ...doc.data() } as RenovationPin);
+            });
+            setPins(fetchedPins);
+        } catch (error) {
+            console.error("Error fetching pins:", error);
+        }
+    };
+
+    useEffect(() => {
+        const unsubscribe = onSnapshot(collection(db, 'pins'), 
+            (snapshot) => {
+                const fetchedPins: RenovationPin[] = [];
+                snapshot.forEach((doc) => {
+                    fetchedPins.push({ id: doc.id, ...doc.data() } as RenovationPin);
+                });
+                setPins(fetchedPins);
+            },
+            (error) => {
+                console.error("Firestore Error Fetching Pins:", error);
+                alert("Database Error: Could not load pins. Please check your Firebase Console Security Rules (they may be missing or expired).");
+            }
+        );
         return () => unsubscribe();
     }, []);
 
     const handleRightClick = (e: any) => {
-        if (e.detail?.latLng) {
-            if (user) {
-                setSelectedPlaceName(null);
-                setTempPin({ lat: e.detail.latLng.lat, lng: e.detail.latLng.lng });
-            } else {
-                loginWithGoogle();
-            }
+        if (e.detail?.latLng || e.latLng) {
+            handleMapClick(e);
         }
     };
 
-    const map = useMap('main-map');
-    const placesLib = useMapsLibrary('places');
-    const geocodingLib = useMapsLibrary('geocoding');
 
     const handleMapClick = useCallback((e: any) => {
         if (!map || !placesLib || !geocodingLib) {
@@ -175,6 +238,8 @@ function MapInner() {
             });
             return;
         }
+
+        if (tempPin) return; // Lock the map pin while chat is open, but allow moving the green confirmation pin freely
 
         const latLng = e.detail?.latLng || e.latLng;
         const placeId = e.detail?.placeId;
@@ -197,9 +262,9 @@ function MapInner() {
             return types && types.length > 0 && types.every(t => REGION_TYPES.includes(t));
         };
 
-        // Open panel immediately with a loading state for better responsiveness
+        // Open confirmation overlay before starting the chat
         setSelectedPlaceName("Detecting location...");
-        setTempPin({ lat, lng });
+        setPendingPin({ lat, lng });
 
         const findNearestBusiness = (loc: { lat: number, lng: number }, service: google.maps.places.PlacesService) => {
             console.log("[CivicSense] Searching for context at", loc);
@@ -285,10 +350,11 @@ function MapInner() {
             console.log("[CivicSense] Background click at:", latLngObj);
             findNearestBusiness(latLngObj, service);
         }
-    }, [user, map, placesLib, geocodingLib]);
+    }, [user, map, placesLib, geocodingLib, tempPin, pendingPin]);
 
     const handleCancel = () => {
         setTempPin(null);
+        setPendingPin(null);
         setSelectedPlaceName(null);
         setRefiningIdea(null);
     };
@@ -400,12 +466,13 @@ function MapInner() {
                                     )}
                                     <div className="px-2 pb-1">
                                         <div className="flex justify-between items-center mb-1.5">
-                                            <span className="text-[10px] text-white/50 uppercase tracking-[0.1em] font-black">Saturation</span>
-                                            <div className={`text-[10px] font-black px-2 py-0.5 rounded-full ${group.ideas[0].saturationIndex! > 5 ? 'bg-red-500/20 text-red-400' : 'bg-green-500/10 text-green-400'}`}>
-                                                {group.ideas[0].saturationIndex?.toFixed(1)}
-                                            </div>
+                                            <span className="text-[10px] text-gray-400 uppercase tracking-wider font-bold">Feasibility Score</span>
+                                            <span className={`text-[10px] font-black px-2 py-0.5 rounded-full ${group.ideas[0].saturationIndex! >= 85 ? 'bg-green-500/20 text-green-400' : 'bg-yellow-500/20 text-yellow-400'}`}>
+                                                {group.ideas[0].saturationIndex?.toFixed(0)}/100
+                                            </span>
                                         </div>
-                                        <div className="text-sm font-bold text-white tracking-tight">{group.ideas[0].businessType}</div>
+                                        <div className="text-sm font-bold text-white tracking-tight truncate">{group.ideas[0].businessType}</div>
+                                        <div className="text-gray-300 text-[10px] mt-1 line-clamp-2 leading-tight">{group.ideas[0].review}</div>
                                         {group.ideas.length > 1 && (
                                             <div className="flex items-center gap-1.5 mt-2 text-purple-400">
                                                 <div className="flex -space-x-2">
@@ -424,6 +491,32 @@ function MapInner() {
                         </div>
                     </AdvancedMarker>
                 ))}
+
+                {pendingPin && (
+                    <AdvancedMarker position={pendingPin} zIndex={50}>
+                        <motion.div
+                            initial={{ scale: 0, opacity: 0, y: 10 }}
+                            animate={{ scale: 1, opacity: 1, y: 0 }}
+                            className="bg-gray-900 border border-purple-500 rounded-lg p-3 shadow-2xl flex flex-col gap-2 items-center min-w-[160px] pointer-events-auto"
+                        >
+                            <span className="text-white text-[11px] font-bold text-center leading-tight">
+                                <span className="text-purple-300">{selectedPlaceName || "this area"}</span>
+                            </span>
+                            <div className="flex w-full mt-1">
+                                <button
+                                    onClick={(e) => {
+                                        e.stopPropagation();
+                                        setTempPin(pendingPin);
+                                        setPendingPin(null);
+                                    }}
+                                    className="w-full bg-gradient-to-r from-purple-600 to-blue-600 hover:from-purple-500 hover:to-blue-500 text-white text-[10px] font-bold py-1.5 rounded transition-colors shadow-lg uppercase tracking-wider"
+                                >
+                                    Confirm
+                                </button>
+                            </div>
+                        </motion.div>
+                    </AdvancedMarker>
+                )}
 
                 {tempPin && (
                     <AdvancedMarker position={tempPin}>
@@ -516,7 +609,7 @@ function MapInner() {
                 }}
                 location={selectedLocation}
                 ideas={activeIdeasForLocation}
-                onIdeaUpdated={() => { }}
+                onIdeaUpdated={fetchPins}
                 initialIdeaId={selectedIdeaId}
                 onAddDetails={(idea) => {
                     setRefiningIdea(idea);
@@ -525,6 +618,6 @@ function MapInner() {
                     setSelectedPlaceName(idea.businessType);
                 }}
             />
-        </div >
+        </div>
     );
 }
