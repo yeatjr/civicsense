@@ -9,16 +9,18 @@
 Zonify is built on a modular three-tier architecture designed for spatial accuracy, reasoning depth, and real-time collaboration.
 
 ### 1.1 Interaction Layer (Frontend)
-The user-facing map interface designed for accessibility by non-technical users.
+The user-facing map interface designed for accessibility by non-technical users who may not be familiar with planning terminology.
 * **Platform:** Google Maps Platform
 * **APIs:** Google Maps JavaScript, Google Places, and Google Static Maps.
-* **Capabilities:** Real-world location selection, Street View immersion, and guided input forms for informal planning terminology.
+* User can select a real-world location, view contextual Street View imagery, and submit their idea through a guided input form. 
 
 ### 1.2 Intelligence Layer (AI)
-The reasoning and structuring engine powered by **Google Gemini**.
+The reasoning and structuring engine powered by **Google Gemini** and is responsible for transforming unstructured user input into structured urban planning components. The AI is not intended to replace professional planners or engineers; instead, it functions as a structuring and reasoning assistant that enhances clarity and supports early-stage proposal articulation.
+
 * **AI (Chat):** Powered by **Gemini 2.5 Flash**. Implements the *Urban Planning Auditor* logic for evaluation, scoring, and analytical reasoning.
 * **AI (Vision):** Powered by **Gemini 2.0 Flash Experimental**. Generates architectural simulations and visual concept renderings.
 * **Functions:** Requirement extraction, contextual interpretation, feasibility triage, and structured template generation.
+
 
 ### 1.3 Data and Collaboration Layer
 A real-time backend ensuring data integrity and traceability.
@@ -57,7 +59,7 @@ Performs a 10km search using the **Google Places API** and existing pins in **Fi
 $$d = 2r \arcsin\left(\sqrt{\sin^2\left(\frac{\phi_2 - \phi_1}{2}\right) + \cos(\phi_1) \cos(\phi_2) \sin^2\left(\frac{\lambda_2 - \lambda_1}{2}\right)}\right)$$
 
 ### 2.3 AI Vision & Map Engine
-The `/api/vision/generate` module performs multi-modal context injection by combining:
+It performs multi-modal context injection by combining:
 1.  User Text + Base64 Street View images.
 2.  Base64 Satellite images.
 3.  Internal Place Scene Maps and Categorized Backgrounds (Business, Civic, Nature, etc.).
