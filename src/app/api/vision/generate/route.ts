@@ -1,8 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { buildImagePrompt, resolvePlaceScene } from '@/lib/vision';
-import fs from 'fs';
-import path from 'path';
 
 const VISION_KEY = process.env.GEMINI_VISION_API_KEY || process.env.GEMINI_API_KEY || '';
 const genAI = new GoogleGenerativeAI(VISION_KEY);
@@ -116,29 +114,9 @@ export async function POST(req: NextRequest) {
 
         let visionUrl = null;
         if (base64Image) {
-            try {
-                const visionsDir = path.join(process.cwd(), 'public', 'visions');
-
-                // Ensure the directory exists
-                if (!fs.existsSync(visionsDir)) {
-                    fs.mkdirSync(visionsDir, { recursive: true });
-                }
-
-                const filename = `${Date.now()}_generated.jpg`;
-                const filePath = path.join(visionsDir, filename);
-
-                // Convert base64 to buffer and save to file
-                const buffer = Buffer.from(base64Image, 'base64');
-                fs.writeFileSync(filePath, buffer);
-
-                // The URL that will be stored in Firestore and loaded by the browser
-                visionUrl = `/visions/${filename}`;
-
-                console.log(`[CivicSense Vision] Image saved locally: ${filePath}`);
-            } catch (err: any) {
-                console.error('[CivicSense Vision] Local save failed:', err);
-                visionUrl = null;
-            }
+            // Prepend data URI prefix for direct browser rendering and Firestore storage
+            visionUrl = `data:image/jpeg;base64,${base64Image}`;
+            console.log(`[CivicSense Vision] Image generated as base64 data URI`);
         }
 
         return NextResponse.json({
