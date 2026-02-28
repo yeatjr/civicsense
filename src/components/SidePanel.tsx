@@ -24,7 +24,40 @@ type Message = {
     imageBase64?: string | null;
 };
 
-export default function SidePanel({ isOpen, location, onCancel, onSuccess, onAiAction, placeName, refiningIdea }: SidePanelProps) {
+// Helper to compress images to stay under Firestore 1MB limit
+const compressBase64 = async (base64: string, maxWidth = 800): Promise<string> => {
+    return new Promise((resolve) => {
+        const img = new Image();
+        img.src = base64.startsWith('data:') ? base64 : `data:image/jpeg;base64,${base64}`;
+        img.crossOrigin = "anonymous";
+        img.onload = () => {
+            const canvas = document.createElement('canvas');
+            let width = img.width;
+            let height = img.height;
+
+            if (width > maxWidth) {
+                height = (maxWidth / width) * height;
+                width = maxWidth;
+            }
+
+            canvas.width = width;
+            canvas.height = height;
+
+            const ctx = canvas.getContext('2d');
+            if (!ctx) {
+                resolve(base64);
+                return;
+            }
+
+            ctx.drawImage(img, 0, 0, width, height);
+            const result = canvas.toDataURL('image/jpeg', 0.7);
+            resolve(result);
+        };
+        img.onerror = () => resolve(base64);
+    });
+};
+
+export default function SidePanel({ isOpen, onCancel: onClose, location, placeName, onAiAction, refiningIdea, onSuccess }: SidePanelProps) {
     const [messages, setMessages] = useState<Message[]>([]);
     const [input, setInput] = useState('');
     const [loading, setLoading] = useState(false);
@@ -184,11 +217,14 @@ export default function SidePanel({ isOpen, location, onCancel, onSuccess, onAiA
                         const visionData = await visionRes.json();
                         console.log("[SidePanel] Vision API returned data:", !!visionData);
                         if (visionData.success) {
-                            finalVisionImage = visionData.visionUrl;
-                            tempBase64 = visionData.base64;
+                            const rawVision = visionData.visionUrl || visionData.base64;
+                            if (rawVision) {
+                                finalVisionImage = await compressBase64(rawVision);
+                                setGeneratedVision(finalVisionImage);
+                            }
+                            tempBase64 = finalVisionImage;
                             analysisData = visionData.analysis;
                             setSiteAnalysis(visionData.analysis);
-                            if (visionData.visionUrl) setGeneratedVision(visionData.visionUrl);
                         }
                     } catch (vErr) {
                         console.error("[SidePanel] Vision Generation failed:", vErr);
