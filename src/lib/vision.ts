@@ -360,3 +360,51 @@ ${commentText}
 ${QUALITY}`;
 }
 
+
+/**
+ * Uses Gemini to synthesize a high-detail architectural brief.
+ * This brief will be used as the primary prompt for the Image Generation model.
+ */
+export async function generateArchitecturalBrief(
+    visionKey: string,
+    userVision: string,
+    placeName: string,
+    envAnalysis: string | null,
+    satelliteAnalysis: string | null
+): Promise<string> {
+    const prompt = `
+        You are a Head Architect and Urban Designer. Your task is to write a detailed 150-word "Architectural Design Brief" that synthesises a user's vision with the existing neighborhood context.
+
+        USER VISION: "${userVision}"
+        LOCATION NAME: "${placeName}"
+        STREET VIEW AUDIT: "${envAnalysis || 'Standard urban environment'}"
+        SATELLITE AUDIT: "${satelliteAnalysis || 'Standard layout'}"
+
+        INSTRUCTIONS:
+        1. Describe the building's specific architectural style, massing, and materiality.
+        2. Explain how it integrates into the observed urban density and streetscape.
+        3. Mention specific features requested by the user.
+        4. Use professional architectural terminology.
+        5. The brief must be a single cohesive paragraph.
+        6. Focus purely on visual descriptions.
+
+        DESIGN BRIEF:
+    `;
+
+    try {
+        const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${visionKey}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                contents: [{ parts: [{ text: prompt }] }]
+            })
+        });
+        if (r.ok) {
+            const j = await r.json();
+            return j?.candidates?.[0]?.content?.parts?.[0]?.text || userVision;
+        }
+    } catch (err) {
+        console.warn('Bridge Brief generation failed:', err);
+    }
+    return userVision;
+}

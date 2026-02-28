@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { GoogleGenerativeAI } from '@google/generative-ai';
-import { buildImagePrompt, resolvePlaceScene } from '@/lib/vision';
+import { buildImagePrompt, resolvePlaceScene, generateArchitecturalBrief } from '@/lib/vision';
 
 const VISION_KEY = process.env.GEMINI_VISION_API_KEY || process.env.GEMINI_API_KEY || '';
 const genAI = new GoogleGenerativeAI(VISION_KEY);
@@ -62,9 +62,18 @@ export async function POST(req: NextRequest) {
             } catch (err) { console.warn('Satellite analysis failed:', err); }
         }
 
-        // 4. Build Final Prompt
-        const fullPrompt = buildImagePrompt(
+        // 4. Generate Architectural Brief (NEW CONSOLIDATION STEP)
+        const designBrief = await generateArchitecturalBrief(
+            VISION_KEY,
             text,
+            placeName || 'Unknown Place',
+            envAnalysis,
+            satelliteAnalysis
+        );
+
+        // 5. Build Final Prompt
+        const fullPrompt = buildImagePrompt(
+            designBrief, // Use the synthesized brief instead of raw user text
             placeScene,
             envAnalysis,
             satelliteAnalysis,
