@@ -17,7 +17,7 @@ The user-facing map interface designed for accessibility by non-technical users 
 ### 1.2 Intelligence Layer (AI)
 The reasoning and structuring engine powered by **Google Gemini** and is responsible for transforming unstructured user input into structured urban planning components. The AI is not intended to replace professional planners or engineers; instead, it functions as a structuring and reasoning assistant that enhances clarity and supports early-stage proposal articulation.
 
-* **AI (Chat):** Powered by **Gemini 2.5 Flash**. Implements the *Urban Planning Auditor* logic for evaluation, scoring, and analytical reasoning.
+* **AI (Chat):** Powered by **Gemini 1.5 Flash**. Implements the *Urban Planning Auditor* logic for evaluation, scoring, and analytical reasoning.
 * **AI (Vision):** Powered by **Gemini 2.0 Flash Experimental**. Generates architectural simulations and visual concept renderings.
 * **Functions:** Requirement extraction, contextual interpretation, feasibility triage, and structured template generation.
 
